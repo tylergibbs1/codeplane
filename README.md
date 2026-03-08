@@ -186,11 +186,98 @@ codeplane/
 └── .env.example
 ```
 
+## SDK
+
+```bash
+npm install @codeplane/sdk
+```
+
+```ts
+import { CodePlaneClient, ConflictError } from "@codeplane/sdk";
+
+// Auto-detects CODEPLANE_URL and CODEPLANE_API_KEY from env
+const cp = new CodePlaneClient({ agentId: "my-agent" });
+
+// Read & write files
+const file = await cp.files.write("src/index.ts", "export const x = 1;");
+const current = await cp.files.get("src/index.ts");
+
+// OCC retry: read → transform → write (retries on conflict)
+await cp.files.update("src/index.ts", (file) =>
+  file.content.replace("const x = 1", "const x = 2")
+);
+
+// Lease a file while working on it
+await cp.leases.withLease("src/auth.ts", async (lease) => {
+  // Other agents are blocked from writing until we're done
+  await cp.files.update("src/auth.ts", (f) => f.content + "\n// updated");
+});
+
+// Atomic multi-file changeset (fluent builder)
+const result = await cp.changesets
+  .build("Rename calculateTotal → computeSum")
+  .update("lib/math.ts", newMathContent)
+  .update("app/main.ts", newMainContent)
+  .create("lib/helpers.ts", helperContent)
+  .delete("lib/old.ts")
+  .submit();
+
+// Multi-agent: switch identity
+const agentB = cp.as("agent-b");
+await agentB.files.write("src/feature.ts", "export const y = 2;");
+
+// File history
+const history = await cp.files.history("src/index.ts");
+const oldVersion = await cp.files.version("src/index.ts", 1);
+
+// Real-time events
+cp.subscribe(["file.*"], (event) => {
+  console.log(`${event.type}: ${JSON.stringify(event.data)}`);
+});
+```
+
+## CLI
+
+```bash
+# Write a file
+codeplane files write src/index.ts "export const x = 1;"
+
+# Write from local file
+codeplane files write src/app.ts --file=./local/app.ts --version=3
+
+# List, read, delete
+codeplane files ls src/
+codeplane files get src/index.ts
+codeplane files rm src/old.ts 2
+
+# File history and diffs
+codeplane files history src/index.ts
+codeplane files version src/index.ts 1
+codeplane files diff src/index.ts 1 3
+
+# Leases
+codeplane leases acquire src/auth.ts --intent="refactoring" --agent=my-agent
+codeplane leases check src/auth.ts
+codeplane leases release <lease-id>
+
+# Changesets
+codeplane cs create "Add auth module"
+codeplane cs stage <id> src/auth.ts --file=./auth.ts --op=create
+codeplane cs commit <id>
+codeplane cs ls --status=committed
+
+# Subscribe to events
+codeplane sub file.* lease.*
+```
+
 ## Testing
 
 ```bash
 # Unit tests (33 tests)
 bun test
+
+# Stress test (26 multi-agent concurrency tests)
+bun run stress-test.ts
 
 # Integration test (34 multi-agent simulation tests)
 bun run test-simulation.ts

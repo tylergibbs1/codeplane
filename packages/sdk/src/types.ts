@@ -8,6 +8,16 @@ export interface FileResponse {
   updatedAt: string;
 }
 
+export interface FileVersionResponse {
+  id: number;
+  path: string;
+  version: number;
+  content: string;
+  contentHash: string;
+  modifiedBy: string | null;
+  createdAt: string;
+}
+
 export interface LeaseResponse {
   id: string;
   filePath: string;
@@ -48,6 +58,10 @@ export interface WsEvent {
 }
 
 export interface CodePlaneOptions {
-  baseUrl: string;
-  apiKey: string;
+  /** Server URL. Defaults to CODEPLANE_URL env or http://localhost:3100 */
+  baseUrl?: string;
+  /** API key. Defaults to CODEPLANE_API_KEY env */
+  apiKey?: string;
+  /** Agent identity for multi-agent coordination */
+  agentId?: string;
 }

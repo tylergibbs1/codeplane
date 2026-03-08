@@ -7,29 +7,41 @@ export async function handleChangesets(
   args: string[]
 ) {
   switch (subcommand) {
-    case "create": {
+    case "create":
+    case "new": {
       const message = args[0];
       const cs = await client.changesets.create(message);
-      console.log(`Changeset created: ${cs.id}`);
+      console.log(`\x1b[32m✓\x1b[0m Changeset created: \x1b[1m${cs.id}\x1b[0m`);
       break;
     }
-    case "get": {
+
+    case "get":
+    case "show": {
       const id = args[0];
-      if (!id) {
-        console.error("Usage: codeplane changesets get <id>");
-        process.exit(1);
-      }
+      if (!id) die("Usage: codeplane changesets get <id>");
       const cs = await client.changesets.get(id);
-      console.log(JSON.stringify(cs, null, 2));
+      console.log(`  ID:      ${cs.id}`);
+      console.log(`  Status:  ${statusColor(cs.status)}`);
+      console.log(`  Agent:   ${cs.agentId}`);
+      console.log(`  Message: ${cs.message || "(none)"}`);
+      if (cs.gitSha) console.log(`  Git SHA: ${cs.gitSha.slice(0, 8)}`);
+      if (cs.files && cs.files.length > 0) {
+        console.log(`  Files:`);
+        for (const f of cs.files) {
+          const op = { create: "+", update: "~", delete: "-" }[f.operation] || "?";
+          console.log(`    ${op} ${f.filePath}`);
+        }
+      }
       break;
     }
-    case "add-file": {
+
+    case "add-file":
+    case "stage": {
       const id = args[0];
       const filePath = args[1];
       const contentOrFlag = args[2];
       if (!id || !filePath || !contentOrFlag) {
-        console.error("Usage: codeplane changesets add-file <id> <path> <content|--file=path> [--op=create|update|delete]");
-        process.exit(1);
+        die("Usage: codeplane changesets add-file <id> <path> <content|--file=path> [--op=create|update|delete]");
       }
 
       let content: string;
@@ -43,30 +55,54 @@ export async function handleChangesets(
       const operation = opArg?.split("=")[1] as "create" | "update" | "delete" | undefined;
 
       await client.changesets.addFile(id, filePath, content, operation);
-      console.log(`File ${filePath} added to changeset ${id}`);
+      console.log(`\x1b[32m✓\x1b[0m Staged ${filePath}`);
       break;
     }
-    case "submit": {
+
+    case "submit":
+    case "commit": {
       const id = args[0];
-      if (!id) {
-        console.error("Usage: codeplane changesets submit <id>");
-        process.exit(1);
-      }
+      if (!id) die("Usage: codeplane changesets submit <id>");
       const cs = await client.changesets.submit(id);
-      console.log(`Changeset ${cs.id}: ${cs.status}`);
-      if (cs.gitSha) console.log(`Git SHA: ${cs.gitSha}`);
+      console.log(`\x1b[32m✓\x1b[0m ${statusColor(cs.status)}`);
+      if (cs.gitSha) console.log(`  Git SHA: ${cs.gitSha.slice(0, 8)}`);
       break;
     }
-    case "list": {
-      const status = args.find((a) => a.startsWith("--status="))?.split("=")[1];
-      const list = await client.changesets.list(status);
-      for (const cs of list) {
-        console.log(`${cs.id} | ${cs.status} | ${cs.message || "(no message)"}`);
+
+    case "list":
+    case "ls": {
+      const statusArg = args.find((a) => a.startsWith("--status="))?.split("=")[1];
+      const list = await client.changesets.list(statusArg);
+      if (list.length === 0) {
+        console.log("\x1b[2mNo changesets found.\x1b[0m");
+        break;
       }
+      for (const cs of list) {
+        const sha = cs.gitSha ? ` ${cs.gitSha.slice(0, 8)}` : "";
+        console.log(
+          `  ${cs.id.slice(0, 8)}…  ${statusColor(cs.status)}  \x1b[2m${cs.agentId}${sha}\x1b[0m  ${cs.message || ""}`
+        );
+      }
+      console.log(`\n\x1b[2m${list.length} changeset(s)\x1b[0m`);
       break;
     }
+
     default:
-      console.error("Usage: codeplane changesets <create|get|add-file|submit|list>");
-      process.exit(1);
+      die("Usage: codeplane changesets <create|get|add-file|submit|list>");
   }
+}
+
+function statusColor(status: string): string {
+  switch (status) {
+    case "committed": return `\x1b[32m${status}\x1b[0m`;
+    case "failed":    return `\x1b[31m${status}\x1b[0m`;
+    case "open":      return `\x1b[36m${status}\x1b[0m`;
+    case "validating": return `\x1b[33m${status}\x1b[0m`;
+    default:          return status;
+  }
+}
+
+function die(msg: string): never {
+  console.error(msg);
+  process.exit(1);
 }

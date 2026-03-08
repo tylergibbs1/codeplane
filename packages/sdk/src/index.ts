@@ -1,7 +1,8 @@
-export { CodePlaneClient } from "./client";
+export { CodePlaneClient, ChangesetBuilder } from "./client";
 export type {
   CodePlaneOptions,
   FileResponse,
+  FileVersionResponse,
   LeaseResponse,
   ChangesetResponse,
   ChangesetFileResponse,
@@ -12,5 +13,7 @@ export {
   ConflictError,
   LeaseConflictError,
   NotFoundError,
+  ValidationError,
+  RateLimitError,
 } from "./errors";
 export type { Subscription } from "./subscription";
