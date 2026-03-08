@@ -1,0 +1,18 @@
+{
+  "name": "@codeplane/cli",
+  "version": "0.1.0",
+  "bin": {
+    "codeplane": "src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target bun",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@codeplane/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.env
+data/
+*.tsbuildinfo
+drizzle/
+bun.lock
+.DS_Store
+*.log
+.breadcrumbs.json
