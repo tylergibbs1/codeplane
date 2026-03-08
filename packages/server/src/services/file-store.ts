@@ -28,36 +28,42 @@ export class FileStore {
     const contentHash = hashContent(content);
 
     if (expectedVersion === undefined) {
-      // Create new file
-      const existing = await this.getFile(path);
-      if (existing) {
-        throw new ConflictError("File already exists. Provide expectedVersion to update.", {
-          path,
-          currentVersion: existing.version,
-        });
-      }
+      // Create new file — use INSERT with PK conflict handling for race safety
+      try {
+        const result = await db
+          .insert(files)
+          .values({
+            path,
+            content,
+            contentHash,
+            lastModifiedBy: agentId,
+            version: 1,
+          })
+          .returning();
 
-      const result = await db
-        .insert(files)
-        .values({
+        // Record version history
+        await db.insert(fileVersions).values({
           path,
+          version: 1,
           content,
           contentHash,
-          lastModifiedBy: agentId,
-          version: 1,
-        })
-        .returning();
+          modifiedBy: agentId,
+        });
 
-      // Record version history
-      await db.insert(fileVersions).values({
-        path,
-        version: 1,
-        content,
-        contentHash,
-        modifiedBy: agentId,
-      });
-
-      return result[0];
+        return result[0];
+      } catch (err: any) {
+        // Unique constraint violation (PK or duplicate key) — file was created by another agent
+        // postgres.js uses err.code, drizzle wraps it — check both
+        const pgCode = err.code ?? err.cause?.code ?? err.constraint_name;
+        if (pgCode === "23505" || err.message?.includes("duplicate key") || err.message?.includes("unique constraint")) {
+          const existing = await this.getFile(path);
+          throw new ConflictError("File already exists. Provide expectedVersion to update.", {
+            path,
+            currentVersion: existing?.version,
+          });
+        }
+        throw err;
+      }
     }
 
     // Update existing file with OCC
