@@ -3,16 +3,12 @@
   "private": true,
   "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "bun run --filter @codeplane/server dev",
-    "build": "bun run --filter '*' build",
-    "test": "bun run --filter '*' test",
-    "db:push": "source .env && cd packages/server && bunx drizzle-kit push",
-    "db:generate": "source .env && cd packages/server && bunx drizzle-kit generate",
-    "db:migrate": "source .env && cd packages/server && bunx drizzle-kit migrate"
+    "dev": "bun run dev.ts",
+    "start": "bun run packages/server/src/index.ts",
+    "test": "bun test",
+    "db:push": "source .env && cd packages/server && bunx drizzle-kit push"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.2.71",
-    "@anthropic-ai/sdk": "^0.78.0",
-    "zod": "^4.3.6"
+  "devDependencies": {
+    "@anthropic-ai/sdk": "^0.78.0"
   }
 }

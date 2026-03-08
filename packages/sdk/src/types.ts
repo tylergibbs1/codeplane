@@ -8,16 +8,6 @@ export interface FileResponse {
   updatedAt: string;
 }
 
-export interface FileVersionResponse {
-  id: number;
-  path: string;
-  version: number;
-  content: string;
-  contentHash: string;
-  modifiedBy: string | null;
-  createdAt: string;
-}
-
 export interface LeaseResponse {
   id: string;
   filePath: string;
@@ -35,7 +25,6 @@ export interface ChangesetResponse {
   message: string | null;
   validationStage: number;
   validationErrors: unknown[];
-  gitSha: string | null;
   createdAt: string;
   submittedAt: string | null;
   committedAt: string | null;
@@ -49,12 +38,6 @@ export interface ChangesetFileResponse {
   content: string;
   baseVersion: number | null;
   operation: "create" | "update" | "delete";
-}
-
-export interface WsEvent {
-  type: string;
-  data: Record<string, unknown>;
-  timestamp: string;
 }
 
 export interface CodePlaneOptions {

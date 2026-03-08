@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import { z } from "zod";
 import type { Env } from "../types";
 import { leaseManager } from "../services/lease-manager";
-import { eventBus } from "../services/event-bus";
 
 const leases = new Hono<Env>();
 
@@ -24,16 +23,6 @@ leases.post("/", async (c) => {
     parsed.intent
   );
 
-  eventBus.publish({
-    type: "lease.acquired",
-    data: {
-      leaseId: lease.id,
-      filePath: lease.filePath,
-      agentId: lease.agentId,
-      expiresAt: lease.expiresAt,
-    },
-  });
-
   return c.json(lease, 201);
 });
 
@@ -41,14 +30,7 @@ leases.post("/", async (c) => {
 leases.delete("/:id", async (c) => {
   const leaseId = c.req.param("id");
   const agentId = c.get("agentId");
-
   await leaseManager.releaseLease(leaseId, agentId);
-
-  eventBus.publish({
-    type: "lease.released",
-    data: { leaseId, agentId },
-  });
-
   return c.body(null, 204);
 });
 

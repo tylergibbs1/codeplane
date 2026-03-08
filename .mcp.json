@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "codeplane": {
+      "command": "bun",
+      "args": ["run", "packages/mcp/src/index.ts"],
+      "env": {
+        "CODEPLANE_API_KEY": "",
+        "CODEPLANE_URL": "http://localhost:3100"
+      }
+    }
+  }
+}

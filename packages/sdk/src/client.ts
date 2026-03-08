@@ -1,19 +1,15 @@
 import type {
   CodePlaneOptions,
   FileResponse,
-  FileVersionResponse,
   LeaseResponse,
   ChangesetResponse,
-  WsEvent,
 } from "./types";
 import { CodePlaneError, ConflictError, LeaseConflictError, NotFoundError, ValidationError, RateLimitError } from "./errors";
-import { WsSubscription, type Subscription } from "./subscription";
 
 export class CodePlaneClient {
   private baseUrl: string;
   private apiKey: string;
   private agentId?: string;
-  private wsSubscription: WsSubscription | null = null;
 
   readonly files: FileOperations;
   readonly leases: LeaseOperations;
@@ -45,30 +41,13 @@ export class CodePlaneClient {
     this.changesets = new ChangesetOperations(this);
   }
 
-  /** Create a client scoped to a specific agent identity */
+  /** Create a client scoped to a different agent identity */
   as(agentId: string): CodePlaneClient {
-    const clone = new CodePlaneClient({
+    return new CodePlaneClient({
       baseUrl: this.baseUrl,
       apiKey: this.apiKey,
       agentId,
     });
-    return clone;
-  }
-
-  subscribe(
-    types: string[],
-    handler: (event: WsEvent) => void
-  ): Subscription {
-    if (!this.wsSubscription) {
-      const wsUrl = this.baseUrl.replace(/^http/, "ws") + "/api/v1/subscribe";
-      this.wsSubscription = new WsSubscription(wsUrl, this.apiKey);
-      this.wsSubscription.connect();
-    }
-    return this.wsSubscription.subscribe(types, handler);
-  }
-
-  close(): void {
-    this.wsSubscription?.close();
   }
 
   /** @internal */
@@ -129,12 +108,10 @@ export class CodePlaneClient {
 class FileOperations {
   constructor(private client: CodePlaneClient) {}
 
-  /** Read a file */
   async get(path: string): Promise<FileResponse> {
     return this.client.request<FileResponse>("GET", `/files/${path}`);
   }
 
-  /** Create or update a file. Omit expectedVersion to create. */
   async write(
     path: string,
     content: string,
@@ -146,38 +123,19 @@ class FileOperations {
     });
   }
 
-  /** List files, optionally filtered by path prefix */
   async list(prefix?: string): Promise<FileResponse[]> {
     const query = prefix ? `?prefix=${encodeURIComponent(prefix)}` : "";
     return this.client.request<FileResponse[]>("GET", `/files${query}`);
   }
 
-  /** Delete a file (requires current version for OCC) */
   async delete(path: string, expectedVersion: number): Promise<void> {
     return this.client.request<void>("DELETE", `/files/${path}`, {
       expectedVersion,
     });
   }
 
-  /** Get version history for a file (newest first) */
-  async history(path: string, limit = 50): Promise<FileVersionResponse[]> {
-    return this.client.request<FileVersionResponse[]>(
-      "GET",
-      `/files/${path}?history=true&limit=${limit}`
-    );
-  }
-
-  /** Get a specific historical version */
-  async version(path: string, version: number): Promise<FileVersionResponse> {
-    return this.client.request<FileVersionResponse>(
-      "GET",
-      `/files/${path}?version=${version}`
-    );
-  }
-
   /**
-   * Write with automatic OCC retry. Reads current version, applies your
-   * update function, writes back. Retries on conflict up to maxRetries times.
+   * Read → transform → write with automatic OCC retry.
    */
   async update(
     path: string,
@@ -191,7 +149,7 @@ class FileOperations {
         return await this.write(path, newContent, current.version);
       } catch (err) {
         if (err instanceof ConflictError && attempt < maxRetries) {
-          continue; // Retry with fresh version
+          continue;
         }
         throw err;
       }
@@ -205,7 +163,6 @@ class FileOperations {
 class LeaseOperations {
   constructor(private client: CodePlaneClient) {}
 
-  /** Acquire an exclusive lease on a file */
   async acquire(
     filePath: string,
     options?: { ttlSeconds?: number; intent?: string }
@@ -217,12 +174,10 @@ class LeaseOperations {
     });
   }
 
-  /** Release a lease */
   async release(leaseId: string): Promise<void> {
     return this.client.request<void>("DELETE", `/leases/${leaseId}`);
   }
 
-  /** Renew a lease */
   async renew(leaseId: string, ttlSeconds?: number): Promise<LeaseResponse> {
     return this.client.request<LeaseResponse>(
       "PUT",
@@ -231,7 +186,6 @@ class LeaseOperations {
     );
   }
 
-  /** Check if a file has an active lease */
   async check(filePath: string): Promise<LeaseResponse | null> {
     const leases = await this.client.request<LeaseResponse[]>(
       "GET",
@@ -242,7 +196,6 @@ class LeaseOperations {
 
   /**
    * Acquire a lease, run your function, then release.
-   * The lease is always released, even if fn throws.
    */
   async withLease<T>(
     filePath: string,
@@ -263,19 +216,16 @@ class LeaseOperations {
 class ChangesetOperations {
   constructor(private client: CodePlaneClient) {}
 
-  /** Create an empty changeset */
   async create(message?: string): Promise<ChangesetResponse> {
     return this.client.request<ChangesetResponse>("POST", "/changesets", {
       message,
     });
   }
 
-  /** Get changeset details including staged files */
   async get(id: string): Promise<ChangesetResponse> {
     return this.client.request<ChangesetResponse>("GET", `/changesets/${id}`);
   }
 
-  /** Stage a file in a changeset */
   async addFile(
     id: string,
     filePath: string,
@@ -288,12 +238,10 @@ class ChangesetOperations {
     });
   }
 
-  /** Remove a file from a changeset */
   async removeFile(id: string, filePath: string): Promise<void> {
     await this.client.request("DELETE", `/changesets/${id}/files/${filePath}`);
   }
 
-  /** Submit a changeset for validation and atomic commit */
   async submit(id: string): Promise<ChangesetResponse> {
     return this.client.request<ChangesetResponse>(
       "POST",
@@ -301,79 +249,11 @@ class ChangesetOperations {
     );
   }
 
-  /** List changesets, optionally filtered by status */
   async list(status?: string): Promise<ChangesetResponse[]> {
     const query = status ? `?status=${encodeURIComponent(status)}` : "";
     return this.client.request<ChangesetResponse[]>(
       "GET",
       `/changesets${query}`
     );
-  }
-
-  /**
-   * Build and submit a changeset in one fluent call.
-   *
-   * ```ts
-   * const result = await cp.changesets
-   *   .build("Rename calculateTotal to computeSum")
-   *   .update("lib/math.ts", newMathContent)
-   *   .update("app/main.ts", newMainContent)
-   *   .create("lib/helpers.ts", helperContent)
-   *   .delete("lib/old.ts")
-   *   .submit();
-   * ```
-   */
-  build(message?: string): ChangesetBuilder {
-    return new ChangesetBuilder(this, message);
-  }
-}
-
-// ─── Changeset Builder ────────────────────────────────────────────────
-
-interface StagedFile {
-  filePath: string;
-  content: string;
-  operation: "create" | "update" | "delete";
-}
-
-export class ChangesetBuilder {
-  private staged: StagedFile[] = [];
-
-  constructor(
-    private ops: ChangesetOperations,
-    private message?: string
-  ) {}
-
-  /** Stage a new file */
-  create(filePath: string, content: string): this {
-    this.staged.push({ filePath, content, operation: "create" });
-    return this;
-  }
-
-  /** Stage an update to an existing file */
-  update(filePath: string, content: string): this {
-    this.staged.push({ filePath, content, operation: "update" });
-    return this;
-  }
-
-  /** Stage a file deletion */
-  delete(filePath: string): this {
-    this.staged.push({ filePath, content: "", operation: "delete" });
-    return this;
-  }
-
-  /** Create the changeset, stage all files, and submit atomically */
-  async submit(): Promise<ChangesetResponse> {
-    if (this.staged.length === 0) {
-      throw new Error("No files staged in changeset");
-    }
-
-    const cs = await this.ops.create(this.message);
-
-    for (const file of this.staged) {
-      await this.ops.addFile(cs.id, file.filePath, file.content, file.operation);
-    }
-
-    return this.ops.submit(cs.id);
   }
 }

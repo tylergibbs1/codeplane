@@ -1,0 +1,16 @@
+{
+  "name": "@codeplane/mcp",
+  "version": "0.1.0",
+  "main": "src/index.ts",
+  "bin": {
+    "codeplane-mcp": "src/index.ts"
+  },
+  "dependencies": {
+    "@codeplane/sdk": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.7.0"
+  }
+}

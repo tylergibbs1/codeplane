@@ -1,4 +1,4 @@
-import { eq, sql, and, inArray } from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 import { db } from "../db";
 import {
   changesets,
@@ -9,8 +9,6 @@ import {
 } from "../db/schema";
 import { ConflictError, NotFoundError, ValidationError } from "../errors";
 import { runValidation } from "./validation-pipeline";
-import { eventBus } from "./event-bus";
-import { gitMaterializer } from "./git-materializer";
 
 function hashContent(content: string): string {
   const hasher = new Bun.CryptoHasher("sha256");
@@ -54,7 +52,6 @@ export class ChangesetEngine {
     content: string,
     operation: "create" | "update" | "delete" = "update"
   ): Promise<ChangesetFile> {
-    // Verify changeset is open
     const cs = await db
       .select()
       .from(changesets)
@@ -70,7 +67,6 @@ export class ChangesetEngine {
       );
     }
 
-    // Get current file version for base_version
     let baseVersion: number | null = null;
     if (operation !== "create") {
       const existing = await db
@@ -83,7 +79,7 @@ export class ChangesetEngine {
       }
     }
 
-    // Upsert: replace if already staged for this changeset
+    // Upsert: replace if already staged
     const existing = await db
       .select()
       .from(changesetFiles)
@@ -129,7 +125,6 @@ export class ChangesetEngine {
   }
 
   async submit(changesetId: string): Promise<Changeset> {
-    // Use raw SQL transaction for SELECT ... FOR UPDATE
     const pgClient = (db as any)._.session.client;
 
     const result = await pgClient.begin(
@@ -146,7 +141,6 @@ export class ChangesetEngine {
           throw new ValidationError(`Changeset is ${cs.status}, cannot submit`);
         }
 
-        // Set to validating
         await tx`
           UPDATE changesets SET status = 'validating', submitted_at = now()
           WHERE id = ${changesetId}
@@ -165,7 +159,6 @@ export class ChangesetEngine {
         const existingPaths = new Set<string>();
         for (const csFile of csFiles) {
           if (csFile.operation === "create") {
-            // Check file doesn't already exist
             const [existing] = await tx`
               SELECT path, version FROM files WHERE path = ${csFile.file_path} FOR UPDATE
             `;
@@ -173,7 +166,6 @@ export class ChangesetEngine {
               existingPaths.add(csFile.file_path);
             }
           } else {
-            // Lock the file row and check version
             const [existing] = await tx`
               SELECT path, version FROM files WHERE path = ${csFile.file_path} FOR UPDATE
             `;
@@ -198,7 +190,6 @@ export class ChangesetEngine {
         }
 
         // 4. Run validation pipeline
-        // Map raw rows to typed objects for validators
         const typedFiles: ChangesetFile[] = csFiles.map((f: any) => ({
           id: f.id,
           changesetId: f.changeset_id,
@@ -255,22 +246,6 @@ export class ChangesetEngine {
       }
     );
 
-    // 7. Post-commit: publish event
-    eventBus.publish({
-      type: "changeset.committed",
-      data: {
-        changesetId: result.id,
-        agentId: result.agent_id,
-        message: result.message,
-      },
-    });
-
-    // 8. Git materialization (async, non-blocking)
-    const csWithFiles = await this.getChangeset(changesetId);
-    gitMaterializer.materialize(csWithFiles).catch((err) => {
-      console.error(`Git materialization failed for changeset ${changesetId}:`, err);
-    });
-
     return {
       id: result.id,
       agentId: result.agent_id,
@@ -278,7 +253,6 @@ export class ChangesetEngine {
       message: result.message,
       validationStage: result.validation_stage,
       validationErrors: result.validation_errors,
-      gitSha: result.git_sha,
       createdAt: result.created_at,
       submittedAt: result.submitted_at,
       committedAt: result.committed_at,

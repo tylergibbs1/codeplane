@@ -2,8 +2,8 @@ import Anthropic from "@anthropic-ai/sdk";
 
 const client = new Anthropic();
 
-const BASE = "http://localhost:3100/api/v1";
-const API_KEY = "dev-key-change-me";
+const BASE = process.env.CODEPLANE_URL || "http://localhost:3100";
+const API_KEY = process.env.CODEPLANE_API_KEY || process.env.API_KEY || "dev-key-change-me";
 
 // --- HTTP helper ---
 async function cp(
@@ -17,7 +17,7 @@ async function cp(
     "Content-Type": "application/json",
     "X-Agent-Id": agentId,
   };
-  const res = await fetch(`${BASE}${path}`, {
+  const res = await fetch(`${BASE}/api/v1${path}`, {
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
@@ -52,7 +52,7 @@ const tools: Anthropic.Tool[] = [
   },
   {
     name: "codeplane_read_file",
-    description: "Read a file from CodePlane",
+    description: "Read a file from CodePlane. Returns content, version, and metadata.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -74,7 +74,7 @@ const tools: Anthropic.Tool[] = [
   },
   {
     name: "codeplane_delete_file",
-    description: "Delete a file from CodePlane",
+    description: "Delete a file from CodePlane (requires current version for OCC)",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -88,12 +88,12 @@ const tools: Anthropic.Tool[] = [
   {
     name: "codeplane_acquire_lease",
     description:
-      "Acquire an exclusive lease on a file. Other agents cannot write to it while leased.",
+      "Acquire an exclusive lease on a file. Other agents get 423 Locked until released or expired.",
     input_schema: {
       type: "object" as const,
       properties: {
         filePath: { type: "string", description: "File path to lease" },
-        ttlSeconds: { type: "number", description: "Lease TTL (default 300)" },
+        ttlSeconds: { type: "number", description: "Lease TTL in seconds (default 300)" },
         intent: { type: "string", description: "What you plan to do" },
         agentId: { type: "string" },
       },
@@ -146,7 +146,7 @@ const tools: Anthropic.Tool[] = [
   {
     name: "codeplane_submit_changeset",
     description:
-      "Submit changeset for validation + atomic commit. Validates syntax, checks versions, commits atomically.",
+      "Submit changeset for atomic commit. Checks versions, commits atomically — all files succeed or all fail.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -158,22 +158,13 @@ const tools: Anthropic.Tool[] = [
   },
   {
     name: "codeplane_get_changeset",
-    description: "Get changeset details including files and status",
+    description: "Get changeset details including staged files and status",
     input_schema: {
       type: "object" as const,
       properties: {
         changesetId: { type: "string" },
       },
       required: ["changesetId"],
-    },
-  },
-  {
-    name: "codeplane_check_git",
-    description: "Check git log and files on disk in the materialized repo",
-    input_schema: {
-      type: "object" as const,
-      properties: {},
-      required: [],
     },
   },
 ];
@@ -242,15 +233,6 @@ async function executeTool(name: string, input: any): Promise<string> {
       );
     case "codeplane_get_changeset":
       return cp("GET", `/changesets/${input.changesetId}`);
-    case "codeplane_check_git": {
-      const log = Bun.spawnSync(["git", "log", "--oneline", "--all"], {
-        cwd: "./data/repo",
-      });
-      const files = Bun.spawnSync(["find", ".", "-type", "f", "-not", "-path", "./.git/*"], {
-        cwd: "./data/repo",
-      });
-      return `Git log:\n${log.stdout.toString().trim()}\n\nFiles on disk:\n${files.stdout.toString().trim()}`;
-    }
     default:
       return `Unknown tool: ${name}`;
   }
@@ -259,42 +241,53 @@ async function executeTool(name: string, input: any): Promise<string> {
 // --- Agentic loop ---
 const SYSTEM = `You are a QA agent testing CodePlane — a transactional code coordination layer for AI agents.
 
-CodePlane provides:
-- File read/write with optimistic concurrency control (version-gated writes)
-- File leases (exclusive locks with TTL, per agent identity)
-- Atomic multi-file changesets with syntax validation
-- Git materialization (changesets become git commits)
+CodePlane provides three primitives that git doesn't have:
+1. Optimistic Concurrency Control — every file has a version, stale writes get 409 Conflict
+2. File Leases — advisory exclusive locks with TTL, per agent identity (423 Locked)
+3. Atomic Changesets — stage multiple files, submit atomically (all succeed or all fail)
 
 You have tools to interact with a running CodePlane server. Your job is to thoroughly test it.
 
 Run these test categories:
 
-1. **Basic CRUD**: Create, read, update, delete files. Verify versions increment.
-2. **OCC conflicts**: Update with stale version → expect 409.
-3. **Leases**: Acquire as agent-a, write as agent-b → expect 423. Release, retry → success.
-4. **Changesets**: Create, stage files, submit. Verify atomic commit works.
-5. **Changeset conflicts**: Two changesets on same file, second should fail.
-6. **Validation**: Invalid JSON, invalid TS → rejected. Valid files → pass.
-7. **Git**: After commits, check git log shows proper history.
-8. **Edge cases**: Empty files, nested paths, special characters, etc.
+1. **Basic CRUD**: Create, read, update, delete files. Verify versions increment correctly.
+2. **OCC conflicts**: Update with stale version → expect 409. Try to create a file that already exists → expect 409.
+3. **Multi-agent leases**: Acquire lease as agent-a, try to write as agent-b → expect 423. Release, retry → success.
+4. **Atomic changesets**: Create changeset, stage 2-3 files, submit. Verify all files exist with correct content.
+5. **Changeset conflicts**: Two changesets touching same file, second submit should fail with version conflict.
+6. **Edge cases**: Empty content, nested paths, special chars in content, large content.
 
 Use the agentId parameter to simulate different agents (e.g., "agent-a", "agent-b").
 
-After all tests, write a structured report with pass/fail for each test and any bugs found.`;
+After all tests, write a structured report:
+- Category name
+- Test description
+- Expected result
+- Actual result
+- PASS or FAIL
+
+Be systematic. Test one thing at a time. Report every result.`;
 
 async function main() {
-  console.log("🚀 Starting CodePlane QA Agent (Claude Sonnet 4.6)\n");
+  console.log("Starting CodePlane QA Agent\n");
+
+  // Load API key from env
+  const envFile = await Bun.file(".env").text();
+  for (const line of envFile.split("\n")) {
+    const [key, ...rest] = line.split("=");
+    if (key && rest.length) process.env[key.trim()] = rest.join("=").trim();
+  }
 
   const messages: Anthropic.MessageParam[] = [
     {
       role: "user",
       content:
-        "Run a comprehensive test suite against the CodePlane server. Start by listing existing files, then systematically test each category. Be thorough.",
+        "Run a comprehensive test suite against the CodePlane server. Test every category systematically. Use unique file paths with a 'qa/' prefix so you don't collide with existing data.",
     },
   ];
 
   let turns = 0;
-  const MAX_TURNS = 40;
+  const MAX_TURNS = 50;
 
   while (turns < MAX_TURNS) {
     turns++;
@@ -334,11 +327,8 @@ async function main() {
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
     for (const tool of toolBlocks) {
       const shortName = tool.name.replace("codeplane_", "");
-      const inputSummary =
-        tool.name === "codeplane_check_git"
-          ? ""
-          : ` ${JSON.stringify(tool.input).slice(0, 80)}`;
-      console.log(`  → ${shortName}${inputSummary}`);
+      const inputSummary = JSON.stringify(tool.input).slice(0, 100);
+      console.log(`  → ${shortName} ${inputSummary}`);
 
       const result = await executeTool(tool.name, tool.input);
       toolResults.push({

@@ -5,7 +5,6 @@ import {
   timestamp,
   uuid,
   jsonb,
-  bigserial,
   boolean,
   uniqueIndex,
 } from "drizzle-orm/pg-core";
@@ -56,7 +55,6 @@ export const changesets = pgTable("changesets", {
   message: text("message"),
   validationStage: integer("validation_stage").notNull().default(0),
   validationErrors: jsonb("validation_errors").$type<unknown[]>().default([]),
-  gitSha: text("git_sha"),
   createdAt: timestamp("created_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -85,27 +83,6 @@ export const changesetFiles = pgTable(
   ]
 );
 
-export const fileVersions = pgTable("file_versions", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  path: text("path").notNull(),
-  version: integer("version").notNull(),
-  content: text("content").notNull(),
-  contentHash: text("content_hash").notNull(),
-  modifiedBy: text("modified_by"),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
-export const events = pgTable("events", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
-  type: text("type").notNull(),
-  payload: jsonb("payload").$type<Record<string, unknown>>().notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-});
-
 // Inferred types
 export type File = typeof files.$inferSelect;
 export type NewFile = typeof files.$inferInsert;
@@ -113,5 +90,3 @@ export type Lease = typeof leases.$inferSelect;
 export type NewLease = typeof leases.$inferInsert;
 export type Changeset = typeof changesets.$inferSelect;
 export type ChangesetFile = typeof changesetFiles.$inferSelect;
-export type FileVersion = typeof fileVersions.$inferSelect;
-export type Event = typeof events.$inferSelect;

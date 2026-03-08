@@ -1,6 +1,6 @@
-import { eq, like, sql, and, desc } from "drizzle-orm";
+import { eq, like, sql } from "drizzle-orm";
 import { db } from "../db";
-import { files, fileVersions, type File, type FileVersion } from "../db/schema";
+import { files, type File } from "../db/schema";
 import { ConflictError, NotFoundError } from "../errors";
 
 function hashContent(content: string): string {
@@ -41,19 +41,8 @@ export class FileStore {
           })
           .returning();
 
-        // Record version history
-        await db.insert(fileVersions).values({
-          path,
-          version: 1,
-          content,
-          contentHash,
-          modifiedBy: agentId,
-        });
-
         return result[0];
       } catch (err: any) {
-        // Unique constraint violation (PK or duplicate key) — file was created by another agent
-        // postgres.js uses err.code, drizzle wraps it — check both
         const pgCode = err.code ?? err.cause?.code ?? err.constraint_name;
         if (pgCode === "23505" || err.message?.includes("duplicate key") || err.message?.includes("unique constraint")) {
           const existing = await this.getFile(path);
@@ -93,15 +82,6 @@ export class FileStore {
       });
     }
 
-    // Record version history
-    await db.insert(fileVersions).values({
-      path,
-      version: result[0].version,
-      content,
-      contentHash,
-      modifiedBy: agentId,
-    });
-
     return result[0];
   }
 
@@ -138,28 +118,6 @@ export class FileStore {
         currentVersion: current.version,
       });
     }
-  }
-  async getHistory(
-    path: string,
-    limit = 50
-  ): Promise<FileVersion[]> {
-    return db
-      .select()
-      .from(fileVersions)
-      .where(eq(fileVersions.path, path))
-      .orderBy(desc(fileVersions.version))
-      .limit(limit);
-  }
-
-  async getVersion(path: string, version: number): Promise<FileVersion | null> {
-    const result = await db
-      .select()
-      .from(fileVersions)
-      .where(
-        and(eq(fileVersions.path, path), eq(fileVersions.version, version))
-      )
-      .limit(1);
-    return result[0] ?? null;
   }
 }
 

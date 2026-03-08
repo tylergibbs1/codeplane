@@ -1,65 +1,72 @@
 import { describe, test, expect } from "bun:test";
-import { validateSingleFile } from "../services/validation-pipeline";
+import { validatePath, sanitizePath } from "../services/validation-pipeline";
 import { validateSchema } from "../services/validators/schema-validator";
-import { validateSyntax } from "../services/validators/syntax-validator";
 import type { ChangesetFile } from "../db/schema";
 
-describe("validateSingleFile", () => {
-  test("accepts valid TypeScript", () => {
-    const result = validateSingleFile("src/index.ts", "export const x = 1;");
-    expect(result.valid).toBe(true);
-    expect(result.errors).toHaveLength(0);
-  });
-
-  test("accepts valid JSON", () => {
-    const result = validateSingleFile("config.json", '{"key": "value"}');
-    expect(result.valid).toBe(true);
-  });
-
-  test("rejects invalid JSON", () => {
-    const result = validateSingleFile("config.json", "{bad json");
-    expect(result.valid).toBe(false);
-    expect(result.errors[0].stage).toBe(1);
-  });
-
-  test("rejects invalid TypeScript", () => {
-    const result = validateSingleFile("src/bad.ts", "const x: = ;; export {");
-    expect(result.valid).toBe(false);
-    expect(result.errors[0].stage).toBe(1);
+describe("validatePath", () => {
+  test("accepts valid paths", () => {
+    expect(validatePath("src/index.ts").valid).toBe(true);
+    expect(validatePath("src/deep/nested/file.ts").valid).toBe(true);
+    expect(validatePath("readme.md").valid).toBe(true);
+    expect(validatePath("config.json").valid).toBe(true);
   });
 
   test("rejects path traversal", () => {
-    const result = validateSingleFile("../etc/passwd", "content");
+    const result = validatePath("../etc/passwd");
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).toContain("traversal");
   });
 
   test("rejects absolute paths", () => {
-    const result = validateSingleFile("/etc/passwd", "content");
+    const result = validatePath("/etc/passwd");
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).toContain("Absolute");
   });
 
   test("rejects empty paths", () => {
-    const result = validateSingleFile("", "content");
+    const result = validatePath("");
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).toContain("Empty");
   });
 
   test("rejects paths over 500 chars", () => {
-    const result = validateSingleFile("a".repeat(501) + ".ts", "const x = 1;");
+    const result = validatePath("a".repeat(501) + ".ts");
     expect(result.valid).toBe(false);
     expect(result.errors[0].message).toContain("too long");
   });
 
-  test("accepts plain text files without syntax check", () => {
-    const result = validateSingleFile("readme.md", "# Hello\nThis is markdown");
-    expect(result.valid).toBe(true);
+  test("rejects paths with control characters", () => {
+    const result = validatePath("src/\x00evil.ts");
+    expect(result.valid).toBe(false);
+    expect(result.errors[0].message).toContain("control characters");
   });
 
-  test("accepts nested paths", () => {
-    const result = validateSingleFile("src/deep/nested/file.ts", "export default {};");
-    expect(result.valid).toBe(true);
+  test("rejects double-encoded path traversal", () => {
+    const result = validatePath("%2e%2e/etc/passwd");
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("sanitizePath", () => {
+  test("passes clean paths through", () => {
+    const result = sanitizePath("src/index.ts");
+    expect(result.clean).toBe("src/index.ts");
+    expect(result.error).toBeUndefined();
+  });
+
+  test("detects null bytes", () => {
+    const result = sanitizePath("src/\x00evil.ts");
+    expect(result.error).toContain("control characters");
+  });
+
+  test("detects tab characters", () => {
+    const result = sanitizePath("src/\tevil.ts");
+    expect(result.error).toContain("control characters");
+  });
+
+  test("detects double-encoded traversal", () => {
+    const result = sanitizePath("%2e%2e/etc/passwd");
+    expect(result.error).toContain("Double-encoded");
   });
 });
 
@@ -114,46 +121,5 @@ describe("validateSchema", () => {
       new Set()
     );
     expect(result.valid).toBe(false);
-  });
-});
-
-describe("validateSyntax", () => {
-  function makeFile(filePath: string, content: string): ChangesetFile {
-    return {
-      id: "test-id",
-      changesetId: "cs-id",
-      filePath,
-      content,
-      baseVersion: null,
-      operation: "update",
-    };
-  }
-
-  test("skips delete operations", () => {
-    const result = validateSyntax([
-      { ...makeFile("bad.json", "{invalid"), operation: "delete" },
-    ]);
-    expect(result.valid).toBe(true);
-  });
-
-  test("validates .tsx files", () => {
-    const result = validateSyntax([
-      makeFile("component.tsx", "export default function App() { return <div />; }"),
-    ]);
-    expect(result.valid).toBe(true);
-  });
-
-  test("validates .jsx files", () => {
-    const result = validateSyntax([
-      makeFile("component.jsx", "export default function App() { return <div />; }"),
-    ]);
-    expect(result.valid).toBe(true);
-  });
-
-  test("passes unknown extensions without checking", () => {
-    const result = validateSyntax([
-      makeFile("data.csv", "not,valid,json,or,ts"),
-    ]);
-    expect(result.valid).toBe(true);
   });
 });

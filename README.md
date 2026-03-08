@@ -2,297 +2,153 @@
 
 A transactional code coordination layer for AI agents.
 
-Git was built for humans working asynchronously over days — it breaks when 10–1000 AI agents write code concurrently. CodePlane sits in front of git as a real-time working-state system with file versioning, leases, atomic changesets, validation, and event streaming.
-
-## Features
-
-- **Optimistic Concurrency Control** — Version-gated file writes. Every update requires `expectedVersion`, stale writes return `409 Conflict`.
-- **File Leases** — Advisory exclusive locks with TTL. Agents acquire leases to prevent other agents from writing to files they're working on (`423 Locked`).
-- **Atomic Changesets** — Multi-file commits using PostgreSQL row-level locks. Stage files, submit atomically — all succeed or all fail.
-- **Validation Pipeline** — Path traversal checks, JSON parsing, TypeScript/JavaScript syntax validation via Bun transpiler.
-- **Git Materialization** — Committed changesets become git commits via isomorphic-git, with serialized queue to prevent race conditions.
-- **File History** — Every version of every file is tracked. Query history and retrieve any previous version.
-- **Event Streaming** — Real-time WebSocket pub/sub with wildcard pattern matching (`file.*`, `lease.*`, `changeset.*`).
-- **Rate Limiting** — Per-agent rate limiting (100 req/min) with standard `X-RateLimit-*` headers.
-
-## Architecture
-
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Agent A    │     │   Agent B    │     │   Agent C    │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                    │
-       └────────────┬───────┴────────────────────┘
-                    │
-              ┌─────▼─────┐
-              │ CodePlane  │  ← HTTP API + WebSocket
-              │   Server   │
-              └─────┬──────┘
-                    │
-         ┌──────────┼──────────┐
-         │          │          │
-    ┌────▼───┐ ┌────▼───┐ ┌───▼────┐
-    │Postgres│ │  Git   │ │ Events │
-    │ (SoT)  │ │ Repo   │ │  Bus   │
-    └────────┘ └────────┘ └────────┘
-```
-
-The database is the source of truth. Git is derived. Events are in-process for the MVP.
+Git was built for humans working asynchronously over days — it breaks when 10–1000 AI agents write code concurrently. CodePlane sits in front of git as a real-time working-state system with file versioning, leases, and atomic changesets.
 
 ## Quick Start
 
-### Prerequisites
-
-- [Bun](https://bun.sh/) (v1.0+)
-- [Docker](https://www.docker.com/) or [OrbStack](https://orbstack.dev/) (for PostgreSQL)
-
-### Setup
+### 1. Start the server
 
 ```bash
-# Clone and install
 git clone https://github.com/tylergibbs1/codeplane.git
 cd codeplane
-bun install
-
-# Start PostgreSQL
-docker compose up -d
-
-# Configure environment
-cp .env.example .env
-
-# Push database schema
-bun run db:push
-
-# Start the server
 bun run dev
 ```
 
-The server starts at `http://localhost:3100`. Verify with:
+One command handles everything — installs dependencies, starts PostgreSQL (via Docker), generates API keys, pushes the database schema, and starts the server with hot reload.
+
+> **Prerequisites:** [Bun](https://bun.sh/) and [Docker](https://www.docker.com/) or [OrbStack](https://orbstack.dev/)
+
+Your API key is printed in the terminal and saved in `.env`.
+
+### 2. Connect Claude Code
 
 ```bash
-curl http://localhost:3100/health
+claude mcp add codeplane \
+  -e CODEPLANE_API_KEY=$(grep API_KEY .env | cut -d= -f2) \
+  -- bun run $(pwd)/packages/mcp/src/index.ts
 ```
 
-## API Reference
+That's it. Claude Code now has coordinated file operations — version-safe writes, file leases, and atomic multi-file commits.
 
-All endpoints require `Authorization: Bearer <API_KEY>` header. Use `X-Agent-Id` header to identify different agents.
+### 3. Use it
 
-### Files
+Ask Claude Code to use CodePlane tools:
 
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/api/v1/files` | List all files (optional `?prefix=src/`) |
-| `GET` | `/api/v1/files/:path` | Read a file |
-| `GET` | `/api/v1/files/:path?history=true` | Get file version history |
-| `GET` | `/api/v1/files/:path?version=N` | Get specific version |
-| `PUT` | `/api/v1/files/:path` | Create or update a file |
-| `DELETE` | `/api/v1/files/:path` | Delete a file |
-
-**Write a file:**
-
-```bash
-# Create
-curl -X PUT http://localhost:3100/api/v1/files/src/index.ts \
-  -H "Authorization: Bearer dev-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "export const hello = \"world\";"}'
-
-# Update (requires current version for OCC)
-curl -X PUT http://localhost:3100/api/v1/files/src/index.ts \
-  -H "Authorization: Bearer dev-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "export const hello = \"updated\";", "expectedVersion": 1}'
+```
+> Use codeplane to write src/index.ts with "export const hello = 'world';"
+> Use codeplane to atomically update both src/api.ts and src/types.ts
+> Use codeplane to lease src/auth.ts while refactoring the auth flow
 ```
 
-### Leases
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/leases` | Acquire a lease |
-| `DELETE` | `/api/v1/leases/:id` | Release a lease |
-| `PUT` | `/api/v1/leases/:id/renew` | Renew a lease |
-| `GET` | `/api/v1/leases` | List active leases |
-
-```bash
-# Acquire a lease (default 5 min TTL)
-curl -X POST http://localhost:3100/api/v1/leases \
-  -H "Authorization: Bearer dev-key-change-me" \
-  -H "X-Agent-Id: agent-a" \
-  -H "Content-Type: application/json" \
-  -d '{"filePath": "src/index.ts", "intent": "refactoring auth module"}'
-```
-
-### Changesets
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `POST` | `/api/v1/changesets` | Create a changeset |
-| `GET` | `/api/v1/changesets` | List changesets (optional `?status=committed`) |
-| `GET` | `/api/v1/changesets/:id` | Get changeset details |
-| `PUT` | `/api/v1/changesets/:id/files/:path` | Stage a file |
-| `DELETE` | `/api/v1/changesets/:id/files/:path` | Unstage a file |
-| `POST` | `/api/v1/changesets/:id/submit` | Submit for validation + atomic commit |
-
-```bash
-# Create a changeset
-CS=$(curl -s -X POST http://localhost:3100/api/v1/changesets \
-  -H "Authorization: Bearer dev-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Add new feature"}' | jq -r '.id')
-
-# Stage files
-curl -X PUT "http://localhost:3100/api/v1/changesets/$CS/files/src/feature.ts" \
-  -H "Authorization: Bearer dev-key-change-me" \
-  -H "Content-Type: application/json" \
-  -d '{"content": "export function feature() {}", "operation": "create"}'
-
-# Submit atomically
-curl -X POST "http://localhost:3100/api/v1/changesets/$CS/submit" \
-  -H "Authorization: Bearer dev-key-change-me"
-```
-
-### WebSocket Events
-
-Connect to `ws://localhost:3100/api/v1/subscribe` for real-time events.
+Or for team-wide setup, drop a `.mcp.json` in your project root:
 
 ```json
-// Subscribe to file events
-{"action": "subscribe", "types": ["file.*"]}
-
-// Subscribe to everything
-{"action": "subscribe", "types": ["*"]}
+{
+  "mcpServers": {
+    "codeplane": {
+      "command": "bun",
+      "args": ["run", "/path/to/codeplane/packages/mcp/src/index.ts"],
+      "env": {
+        "CODEPLANE_API_KEY": "your-key",
+        "CODEPLANE_URL": "http://localhost:3100"
+      }
+    }
+  }
+}
 ```
 
-Event types: `file.created`, `file.updated`, `file.deleted`, `lease.acquired`, `lease.released`, `lease.expired`, `changeset.committed`
+## What It Does
 
-## Project Structure
+Three primitives that git doesn't have:
 
-```
-codeplane/
-├── packages/
-│   ├── server/          # Hono API server
-│   │   └── src/
-│   │       ├── db/          # Drizzle schema + connection
-│   │       ├── middleware/   # Auth, lease check, rate limit, error handler
-│   │       ├── routes/       # Files, leases, changesets, WebSocket
-│   │       ├── services/     # File store, lease manager, changeset engine,
-│   │       │                 # event bus, git materializer, validation pipeline
-│   │       └── jobs/         # Lease expiry background job
-│   ├── sdk/             # TypeScript SDK (@codeplane/sdk)
-│   └── cli/             # CLI tool (@codeplane/cli)
-├── agent-tester.ts      # Autonomous AI QA agent (Claude Sonnet)
-├── test-simulation.ts   # Multi-agent integration tests
-├── docker-compose.yml   # PostgreSQL
-└── .env.example
-```
+**1. Optimistic Concurrency Control** — Every file has a version. Updates require `expectedVersion`. Stale writes get `409 Conflict`. No more lost writes.
+
+**2. File Leases** — Advisory locks with TTL. Agent A locks a file while refactoring it. Agent B gets `423 Locked` until A is done or the lease expires.
+
+**3. Atomic Changesets** — Stage multiple files, submit atomically. All succeed or all fail. No more half-applied changes across files.
+
+## Tools
+
+Claude Code agents get 7 tools via the MCP server:
+
+| Tool | Purpose |
+|------|---------|
+| `codeplane_read` | Read a file (content + version) |
+| `codeplane_write` | Write/create with version safety |
+| `codeplane_list` | List files by prefix |
+| `codeplane_delete` | Delete with version check |
+| `codeplane_lease` | Acquire, release, or check file locks |
+| `codeplane_atomic_write` | Write multiple files atomically in one call |
+| `codeplane_changeset` | Fine-grained multi-file staging and commit |
 
 ## SDK
+
+For building your own agents or integrations:
 
 ```bash
 npm install @codeplane/sdk
 ```
 
 ```ts
-import { CodePlaneClient, ConflictError } from "@codeplane/sdk";
+import { CodePlaneClient } from "@codeplane/sdk";
 
-// Auto-detects CODEPLANE_URL and CODEPLANE_API_KEY from env
 const cp = new CodePlaneClient({ agentId: "my-agent" });
 
-// Read & write files
-const file = await cp.files.write("src/index.ts", "export const x = 1;");
-const current = await cp.files.get("src/index.ts");
+// Write a file
+await cp.files.write("src/index.ts", "export const x = 1;");
 
-// OCC retry: read → transform → write (retries on conflict)
+// Update with OCC retry (read → transform → write, retries on conflict)
 await cp.files.update("src/index.ts", (file) =>
   file.content.replace("const x = 1", "const x = 2")
 );
 
-// Lease a file while working on it
-await cp.leases.withLease("src/auth.ts", async (lease) => {
-  // Other agents are blocked from writing until we're done
+// Lock a file while working on it
+await cp.leases.withLease("src/auth.ts", async () => {
   await cp.files.update("src/auth.ts", (f) => f.content + "\n// updated");
 });
 
-// Atomic multi-file changeset (fluent builder)
-const result = await cp.changesets
-  .build("Rename calculateTotal → computeSum")
-  .update("lib/math.ts", newMathContent)
-  .update("app/main.ts", newMainContent)
-  .create("lib/helpers.ts", helperContent)
-  .delete("lib/old.ts")
-  .submit();
-
-// Multi-agent: switch identity
-const agentB = cp.as("agent-b");
-await agentB.files.write("src/feature.ts", "export const y = 2;");
-
-// File history
-const history = await cp.files.history("src/index.ts");
-const oldVersion = await cp.files.version("src/index.ts", 1);
-
-// Real-time events
-cp.subscribe(["file.*"], (event) => {
-  console.log(`${event.type}: ${JSON.stringify(event.data)}`);
-});
+// Atomic multi-file change
+const cs = await cp.changesets.create("Rename function");
+await cp.changesets.addFile(cs.id, "lib/math.ts", newContent, "update");
+await cp.changesets.addFile(cs.id, "app/main.ts", newContent, "update");
+await cp.changesets.submit(cs.id);
 ```
 
-## CLI
+## API
 
-```bash
-# Write a file
-codeplane files write src/index.ts "export const x = 1;"
+All endpoints require `Authorization: Bearer <API_KEY>`.
 
-# Write from local file
-codeplane files write src/app.ts --file=./local/app.ts --version=3
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/v1/files` | List files (`?prefix=src/`) |
+| `GET` | `/api/v1/files/:path` | Read a file |
+| `PUT` | `/api/v1/files/:path` | Write a file (`expectedVersion` for OCC) |
+| `DELETE` | `/api/v1/files/:path` | Delete a file |
+| `POST` | `/api/v1/leases` | Acquire a lease |
+| `DELETE` | `/api/v1/leases/:id` | Release a lease |
+| `PUT` | `/api/v1/leases/:id/renew` | Renew a lease |
+| `GET` | `/api/v1/leases` | List active leases |
+| `POST` | `/api/v1/changesets` | Create a changeset |
+| `GET` | `/api/v1/changesets/:id` | Get changeset details |
+| `PUT` | `/api/v1/changesets/:id/files/:path` | Stage a file |
+| `POST` | `/api/v1/changesets/:id/submit` | Submit atomically |
 
-# List, read, delete
-codeplane files ls src/
-codeplane files get src/index.ts
-codeplane files rm src/old.ts 2
+## Architecture
 
-# File history and diffs
-codeplane files history src/index.ts
-codeplane files version src/index.ts 1
-codeplane files diff src/index.ts 1 3
-
-# Leases
-codeplane leases acquire src/auth.ts --intent="refactoring" --agent=my-agent
-codeplane leases check src/auth.ts
-codeplane leases release <lease-id>
-
-# Changesets
-codeplane cs create "Add auth module"
-codeplane cs stage <id> src/auth.ts --file=./auth.ts --op=create
-codeplane cs commit <id>
-codeplane cs ls --status=committed
-
-# Subscribe to events
-codeplane sub file.* lease.*
+```
+Agents → CodePlane (HTTP API) → PostgreSQL (source of truth)
 ```
 
-## Testing
+The database is the source of truth. Every file write is version-checked. Every changeset uses `SELECT ... FOR UPDATE` row-level locks. No git, no file system races, no merge conflicts.
 
-```bash
-# Unit tests (33 tests)
-bun test
+## Project Structure
 
-# Stress test (26 multi-agent concurrency tests)
-bun run stress-test.ts
-
-# Integration test (34 multi-agent simulation tests)
-bun run test-simulation.ts
-
-# AI QA agent (requires ANTHROPIC_API_KEY)
-bun run agent-tester.ts
 ```
-
-## Tech Stack
-
-- **Runtime**: [Bun](https://bun.sh/)
-- **Framework**: [Hono](https://hono.dev/)
-- **Database**: PostgreSQL 16 + [Drizzle ORM](https://orm.drizzle.team/)
-- **Git**: [isomorphic-git](https://isomorphic-git.org/)
-- **Validation**: [Zod](https://zod.dev/) + Bun Transpiler
+packages/
+├── server/    # Hono API server + PostgreSQL
+├── sdk/       # TypeScript SDK
+└── mcp/       # MCP server for Claude Code
+```
 
 ## License
 
